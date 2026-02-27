@@ -68,7 +68,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 This project is licensed under the MIT License
 
 
-## Made with 🫶 using Google Antigravity
+## 🫶 Made with using Google Antigravity
 
 https://antigravity.google/
 
