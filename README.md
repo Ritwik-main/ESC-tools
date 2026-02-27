@@ -15,10 +15,8 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
 - **Stress Test**: High-load cycling to test ESC/Motor cooling and stability.
 - **PPM Generator**: 12-channel PPM signal generation for flight controller testing.
 - **Persistent Settings**: Save your min/max pulse and frequency preferences to EEPROM.
-  
-> [!NOTE]
-> ### Transparency First
-> The major portion of this project was coded using Antigravity IDE. Feel free to comment, request edits/changes, pull requests, and give reviews.
+
+The major portion of this project was coded using Antigravity IDE. Feel free to comment, request edits/changes, pull requests, and give reviews.
 
 ## 🕹️ Hardware Setup
 
