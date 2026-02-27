@@ -27,6 +27,13 @@ The **PPM Generator** outputs a standard 12-channel radio stream.
 - **Logic:** A state-machine inside the Timer 1 interrupt toggles the signal and dynamically modifies the next "compare match" value.
 - **Frame Sync:** Ensures a standard 27ms total frame length regardless of individual channel widths.
 
+### 4. PPM Reader Logic
+The **PPM Reader** allows reading individual channels from a Radio Receiver.
+- **Mechanism:** Also uses Pin 2, triggering on `RISING` edges.
+- **Sync:** Detects the long gap (>3ms) to reset the channel index for each frame.
+- **Visuals:** Shows up to 8 channels simultaneously with numerical values and mini status bars.
+- **Refresh Rate:** Tracks the signal refresh rate in Hz.
+
 ---
 
 ## 🛠 Feature Breakdown
@@ -73,4 +80,5 @@ User settings are stored in **EEPROM** using a magic-byte verification (`0x53455
 
 > [!IMPORTANT]
 > **Safety First:** The tool includes a "Global Reset" feature. Pressing the **BACK** button in any active mode immediately cuts the signal to 0% and stops the PWM generator.
+
 
