@@ -74,12 +74,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 This project is licensed under the MIT License
 
-
-## 🫶 Made with using Google Antigravity
-
-https://antigravity.google/
-
-
 ---
 ## 🚀 Roadmap / To-Do
 - [x] Initial project setup
