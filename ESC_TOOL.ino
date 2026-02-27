@@ -1,5 +1,3 @@
-// code wrirten by Google Antigravity with Gemini 3 Flash
-//reviewed by human
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -52,6 +50,12 @@ volatile int droppedFrameCount = 0;
 unsigned long lastDropReset = 0;
 int droppedFPS = 0;
 
+// PPM Reader Variables
+volatile int ppmInValues[12];
+volatile byte ppmInChannel = 0;
+volatile unsigned long lastPpmTime = 0;
+volatile unsigned int ppmFrameCount = 0;
+
 // Sweep Variables
 bool sweepDirection = true;
 unsigned long lastSweepUpdate = 0;
@@ -65,6 +69,7 @@ enum SystemState {
   STEP_THROTTLE,
   AUTO_SWEEP,
   PWM_READER,
+  PPM_READER,
   STRESS_TEST,
   CALIBRATION,
   SETTINGS,
@@ -77,13 +82,14 @@ unsigned long stateTimer = 0;
 // Menu Variables
 int menuIndex = 0;
 int menuScrollOffset = 0;
-const int menuItemsCount = 8;
+const int menuItemsCount = 9;
 const int visibleItemsCount = 5; 
 const char* menuItems[] = {
   "Manual PWM",
   "Step Throttle",
   "Auto Sweep",
   "PWM Reader",
+  "PPM Reader",
   "Stress Test",
   "ESC Calibration",
   "PPM Generator",
@@ -164,7 +170,7 @@ void loop() {
   // Global Back Button Handling
   if (currentState != MAIN_MENU && currentState != SPLASH) {
     if (digitalRead(BTN_BACK) == LOW && (millis() - lastButtonPress > debounceDelay)) {
-      if (currentState == PWM_READER) {
+      if (currentState == PWM_READER || currentState == PPM_READER) {
         detachInterrupt(digitalPinToInterrupt(PWM_IN_PIN));
       }
       if (currentState == SETTINGS) {
@@ -220,6 +226,10 @@ void loop() {
 
     case PWM_READER:
       handlePWMReader();
+      break;
+
+    case PPM_READER:
+      handlePPMReader();
       break;
 
     case STRESS_TEST:
@@ -354,10 +364,11 @@ void handleMenuInput() {
       case 1: currentState = STEP_THROTTLE; break;
       case 2: currentState = AUTO_SWEEP; break;
       case 3: currentState = PWM_READER; break;
-      case 4: currentState = STRESS_TEST; break;
-      case 5: currentState = CALIBRATION; break;
-      case 6: currentState = PPM_GENERATOR; break;
-      case 7: currentState = SETTINGS; break;
+      case 4: currentState = PPM_READER; break;
+      case 5: currentState = STRESS_TEST; break;
+      case 6: currentState = CALIBRATION; break;
+      case 7: currentState = PPM_GENERATOR; break;
+      case 8: currentState = SETTINGS; break;
     }
     display.clearDisplay();
     display.setCursor(0,0);
@@ -536,6 +547,22 @@ void pwmMeasureISR() {
   }
 }
 
+void ppmMeasureISR() {
+  unsigned long now = micros();
+  unsigned long diff = now - lastPpmTime;
+  lastPpmTime = now;
+  
+  if (diff > 3000) {
+    ppmInChannel = 0;
+    ppmFrameCount++;
+  } else {
+    if (ppmInChannel < 12) {
+      ppmInValues[ppmInChannel] = (int)diff;
+      ppmInChannel++;
+    }
+  }
+}
+
 void handlePWMReader() {
   static bool interruptAttached = false;
   if (!interruptAttached) {
@@ -599,6 +626,62 @@ void handlePWMReader() {
 
   // Handle exiting (detach interrupt)
   if (currentState != PWM_READER) {
+    detachInterrupt(digitalPinToInterrupt(PWM_IN_PIN));
+    interruptAttached = false;
+  }
+}
+
+void handlePPMReader() {
+  static bool interruptAttached = false;
+  static unsigned long lastFpsCalc = 0;
+  static unsigned int lastFrameCount = 0;
+  
+  if (!interruptAttached) {
+    pinMode(PWM_IN_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PWM_IN_PIN), ppmMeasureISR, RISING);
+    interruptAttached = true;
+    for(int i=0; i<12; i++) ppmInValues[i] = 0;
+    ppmFrameCount = 0;
+    lastFrameCount = 0;
+  }
+
+  // Calculate Refresh Rate
+  if (millis() - lastFpsCalc > 1000) {
+    droppedFPS = ppmFrameCount - lastFrameCount;
+    lastFrameCount = ppmFrameCount;
+    lastFpsCalc = millis();
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(F("--- PPM ANALYZER ---"));
+  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+
+  // Show 8 channels with mini bars
+  for (int i = 0; i < 8; i++) {
+    int x = (i % 2) * 64;
+    int y = 14 + (i / 2) * 12;
+    
+    display.setCursor(x, y);
+    display.print(F("C")); display.print(i + 1); display.print(F(":"));
+    display.print(ppmInValues[i]);
+    
+    // Mini bar
+    int barW = map(constrain(ppmInValues[i], 800, 2200), 800, 2200, 0, 28);
+    display.drawRect(x + 34, y + 1, 30, 5, SSD1306_WHITE);
+    display.fillRect(x + 35, y + 2, barW, 3, SSD1306_WHITE);
+  }
+
+  // Monitor refresh rate
+  display.setCursor(0, 56);
+  display.print(F("RATE: ")); 
+  display.print(droppedFPS);
+  display.print(F(" Hz"));
+  
+  display.display();
+
+  if (currentState != PPM_READER) {
     detachInterrupt(digitalPinToInterrupt(PWM_IN_PIN));
     interruptAttached = false;
   }
