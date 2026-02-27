@@ -37,6 +37,9 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
 | **Button DN**| A0 | Pull-up enabled |
 | **Button SEL**| A2 | Pull-up enabled |
 | **Button BK** | A3 | Pull-up enabled |
+
+**Note:** If you want to power the circuit with your BEC and not add a battery/USB power it, connect the 5V pin of the ESC to Vin of arduino.
+
 <img width="3000" height="2367" alt="circuit_image" src="https://github.com/user-attachments/assets/c663d757-ee5a-47f5-ba49-9e20aff8d1c1" />
 Designed with cirkitdesigner IDE
 
@@ -74,6 +77,7 @@ https://antigravity.google/
 ## 🚀 Roadmap / To-Do
 - [x] Initial project setup
 - [x] Implement core API logic
+- [ ] implement battery pack using tp4056 and mt3608
 - [ ] Add hardware demo and pictures
 - [ ] Add catchy banner maybe
 - [ ] Add hardware reference sites
