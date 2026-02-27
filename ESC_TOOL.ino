@@ -15,8 +15,8 @@
 #define OLED_RESET  8
 
 // Button Pins (Active-LOW, connected to GND)
-#define BTN_UP      A1
-#define BTN_DOWN    A0
+#define BTN_UP      A0
+#define BTN_DOWN    A1
 #define BTN_SEL     A2
 #define BTN_BACK    A3
 
@@ -317,7 +317,7 @@ void drawMenu() {
 void handleMenuInput() {
   if (millis() - lastButtonPress < debounceDelay) return;
 
-  if (digitalRead(BTN_DOWN) == LOW) {
+  if (digitalRead(BTN_UP) == LOW) {
     menuIndex--;
     if (menuIndex < 0) {
       menuIndex = menuItemsCount - 1;
@@ -332,7 +332,7 @@ void handleMenuInput() {
     drawMenu();
     lastButtonPress = millis();
   }
-  else if (digitalRead(BTN_UP) == LOW) {
+  else if (digitalRead(BTN_DOWN) == LOW) {
     menuIndex++;
     if (menuIndex >= menuItemsCount) {
       menuIndex = 0;
