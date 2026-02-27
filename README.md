@@ -18,7 +18,7 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
   
 > [!NOTE]
 > ### Transparency First
-> The major portion of this project was **"vibe coded"** using Antigravity IDE running Gemini, but I have human read and verified portions of code to ensure they are safe. Feel free to comment, request edits/changes, pull requests, and give reviews.
+> The major portion of this project was coded using Antigravity IDE. Feel free to comment, request edits/changes, pull requests, and give reviews.
 
 ## 🕹️ Hardware Setup
 
