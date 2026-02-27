@@ -61,14 +61,10 @@ Simplifies the often-confusing beep-sequence of ESC calibration.
 
 ## 🔌 Hardware Configuration
 
-| Component | Pin | Note |
-| :--- | :--- | :--- |
-| **PWM Output** | Pin 3 | Timer 1 Hardware OC1B pin |
-| **PWM Input** | Pin 2 | External Interrupt INT0 |
-| **OLED CS** | Pin 10 | SPI Chip Select |
-| **OLED DC** | Pin 9 | Data/Command |
-| **OLED Reset** | Pin 8 | Hard Reset |
-| **Buttons** | A0-A3 | Configured with Internal Pull-ups |
+| Component | Pin |
+| :--- | :--- |
+| **PWM Output** | Pin 3 |
+| **PWM Input** | Pin 2 |
 
 ---
 
@@ -77,3 +73,4 @@ User settings are stored in **EEPROM** using a magic-byte verification (`0x53455
 
 > [!IMPORTANT]
 > **Safety First:** The tool includes a "Global Reset" feature. Pressing the **BACK** button in any active mode immediately cuts the signal to 0% and stops the PWM generator.
+
