@@ -56,6 +56,10 @@ Designed with cirkitdesigner IDE
 3. Select your board (e.g., Arduino Nano) and port.
 4. Click **Upload**.
 
+> [!NOTE]
+> ### Safety first
+> Please ensure your actuators are firmly held or under mechanical control before you fire them up, and detach your propellers. 
+
 ## 📖 Usage
 
 - **Navigation**: Use **UP** and **DOWN** buttons to scroll through the menu.
