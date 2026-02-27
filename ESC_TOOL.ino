@@ -1,8 +1,9 @@
+// code wrirten by Google Antigravity with Gemini 3 Flash
+//reviewed by human
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <EEPROM.h>
-//#include <Servo.h> // Removed standard Servo library
 
 // Screen Dimensions
 #define SCREEN_WIDTH 128
@@ -460,9 +461,6 @@ void handleManualPWM() {
   display.setCursor(10, 40);
   display.print(F("PWR: ")); display.print(percent); display.print(F("%"));
 
-  display.setTextSize(1);
-  display.setCursor(0, 56);
-  display.print(F("  [UP/DN]    [BACK]"));
   display.display();
 
   updatePWMParams(sysSettings.frequency, currentThrottle);
