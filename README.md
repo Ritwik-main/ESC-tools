@@ -14,6 +14,7 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
 - **ESC Calibration**: Guided step-by-step routine to calibrate new ESCs.
 - **Stress Test**: High-load cycling to test ESC/Motor cooling and stability.
 - **PPM Generator**: 12-channel PPM signal generation for flight controller testing.
+- **PPM Reader**: PPM channels reader to analyse and debug radio recievers.
 - **Persistent Settings**: Save your min/max pulse and frequency preferences to EEPROM.
 
 The major portion of this project was coded using Antigravity IDE. Feel free to comment, request edits/changes, pull requests, and give reviews.
@@ -87,4 +88,5 @@ https://antigravity.google/
 - [ ] Add hardware demo and pictures
 - [ ] Add catchy banner maybe
 - [ ] Add hardware reference sites
+- [x] Add PPM reader
 - [x] Write documentation
