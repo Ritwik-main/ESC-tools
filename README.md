@@ -37,6 +37,7 @@ A comprehensive **ESC Debugger & Signal Tool** built for Arduino. This tool prov
 | **Button DN**| A0 | Pull-up enabled |
 | **Button SEL**| A2 | Pull-up enabled |
 | **Button BK** | A3 | Pull-up enabled |
+<img width="3000" height="2367" alt="circuit_image" src="https://github.com/user-attachments/assets/c663d757-ee5a-47f5-ba49-9e20aff8d1c1" />
 
 ## 🚀 Installation
 
