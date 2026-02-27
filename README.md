@@ -16,8 +16,9 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
 - **PPM Generator**: 12-channel PPM signal generation for flight controller testing.
 - **Persistent Settings**: Save your min/max pulse and frequency preferences to EEPROM.
   
-> [!Note from dev]
-> **Transparency First:** The major portion of this project was "vibe coded" using Antigravity IDE running Gemini, but i have human read and verified portions of code to ensure they are safe. Feel free to comment, request edits/changes, pull requests, and give reviews.
+> [!NOTE]
+> ### Transparency First
+> The major portion of this project was **"vibe coded"** using Antigravity IDE running Gemini, but I have human read and verified portions of code to ensure they are safe. Feel free to comment, request edits/changes, pull requests, and give reviews.iews.
 
 ## 🕹️ Hardware Setup
 
