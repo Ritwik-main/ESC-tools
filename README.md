@@ -1,6 +1,6 @@
 # ESC Tools (v1.0) 🛠️
 
-A comprehensive **ESC Debugger & Signal Tool** built for Arduino. This tool provides a powerful interface for testing, calibrating, and analyzing Electronic Speed Controllers (ESCs) and PWM signals, all within a compact handheld device.
+A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool provides a powerful interface for testing, calibrating, and analyzing Electronic Speed Controllers (ESCs), Servo motors, Flight computers, Stepper motors, and all PWM Interfaces, all within a compact handheld device.
 
 ## ✨ Features
 
@@ -63,4 +63,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 This project is licensed under the MIT License
 
+
+Made with 🫶 using Google Antigravity
 ---
