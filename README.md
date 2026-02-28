@@ -46,6 +46,11 @@ The major portion of this project was coded using Antigravity IDE. Feel free to 
 <img width="3000" height="2367" alt="circuit_image" src="https://github.com/user-attachments/assets/c663d757-ee5a-47f5-ba49-9e20aff8d1c1" />
 Designed with cirkitdesigner IDE
 
+## 🌐 Hardware reference
+1. Arduino Nano: https://robocraze.com/products/nano-development-board-compatible-with-arduino
+2. Oled display: https://robu.in/product/0-96-oled-display-module
+3. Buttons: https://robocraze.com/products/4-pins-dip-momentary-square-tactile-push-button-switch-10-pieces-6x6x5mm
+
 ## 🚀 Installation
 
 1. Install the following libraries in the Arduino IDE:
@@ -81,6 +86,6 @@ This project is licensed under the MIT License
 - [ ] implement battery pack using tp4056 and mt3608
 - [ ] Add hardware demo and pictures
 - [ ] Add catchy banner maybe
-- [ ] Add hardware reference sites
+- [x] Add hardware reference sites
 - [x] Add PPM reader
 - [x] Write documentation
