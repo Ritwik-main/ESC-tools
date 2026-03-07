@@ -53,6 +53,12 @@ Automated ramping for stress testing and burn-in.
 - **Logic:** Smoothly cycles from `Min` to `Max` and back.
 - **Use Case:** Checking for vibration issues at specific RPMs or thermal performance under varying loads.
 
+### 🔹 Noisy Signal
+A specialized mode for testing the robustness of an ESC's signal processing.
+- **Jitter:** Introduces a random ±10µs variation to each pulse width.
+- **Drop Outs:** Randomly skips 5% of frames (signal held low) to simulate poor connection or electromagnetic interference.
+- **Use Case:** Validating if your ESC handles "dirty" signals gracefully or if it enters failsafe unnecessarily.
+
 ### 🔹 Stress Test (Jump Mode)
 The "Hammer" test for ESCs.
 - **Logic:** Instantly jumps between 0% and 100% throttle every 1 second.

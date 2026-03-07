@@ -11,6 +11,7 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
   - Pulse width (µs) and Frequency (Hz) measurement.
   - Jitter analysis and Dropped Frame tracking.
   - **Mini Logic Analyzer**: Visual waveform representation on the OLED.
+- **Noisy Signal**: Simulate real-world signal issues with programmable jitter (±10µs) and dropped frames (5%) to test ESC stability.
 - **ESC Calibration**: Guided step-by-step routine to calibrate new ESCs.
 - **Stress Test**: High-load cycling to test ESC/Motor cooling and stability.
 - **PPM Generator**: 12-channel PPM signal generation for flight controller testing.
@@ -89,3 +90,4 @@ This project is licensed under the MIT License
 - [x] Add hardware reference sites
 - [x] Add PPM reader
 - [x] Write documentation
+- [x] Add Noisy Signal feature

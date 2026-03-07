@@ -73,7 +73,8 @@ enum SystemState {
   STRESS_TEST,
   CALIBRATION,
   SETTINGS,
-  PPM_GENERATOR
+  PPM_GENERATOR,
+  NOISY_PWM
 };
 
 SystemState currentState = SPLASH;
@@ -82,12 +83,13 @@ unsigned long stateTimer = 0;
 // Menu Variables
 int menuIndex = 0;
 int menuScrollOffset = 0;
-const int menuItemsCount = 9;
+const int menuItemsCount = 10;
 const int visibleItemsCount = 5; 
 const char* menuItems[] = {
   "Manual PWM",
   "Step Throttle",
   "Auto Sweep",
+  "Noisy Signal",
   "PWM Reader",
   "PPM Reader",
   "Stress Test",
@@ -222,6 +224,10 @@ void loop() {
 
     case AUTO_SWEEP:
       handleAutoSweep();
+      break;
+
+    case NOISY_PWM:
+      handleNoisyPWM();
       break;
 
     case PWM_READER:
@@ -363,12 +369,13 @@ void handleMenuInput() {
       case 0: currentState = MANUAL_PWM; break;
       case 1: currentState = STEP_THROTTLE; break;
       case 2: currentState = AUTO_SWEEP; break;
-      case 3: currentState = PWM_READER; break;
-      case 4: currentState = PPM_READER; break;
-      case 5: currentState = STRESS_TEST; break;
-      case 6: currentState = CALIBRATION; break;
-      case 7: currentState = PPM_GENERATOR; break;
-      case 8: currentState = SETTINGS; break;
+      case 3: currentState = NOISY_PWM; break;
+      case 4: currentState = PWM_READER; break;
+      case 5: currentState = PPM_READER; break;
+      case 6: currentState = STRESS_TEST; break;
+      case 7: currentState = CALIBRATION; break;
+      case 8: currentState = PPM_GENERATOR; break;
+      case 9: currentState = SETTINGS; break;
     }
     display.clearDisplay();
     display.setCursor(0,0);
@@ -712,9 +719,25 @@ ISR(TIMER1_COMPA_vect) {
     }
     ppmPhase++;
     if (ppmPhase >= 26) ppmPhase = 0;
+  } else if (currentState == NOISY_PWM) {
+    // Dropped Frame Logic (approx 5% drop rate)
+    if (random(100) < 5) {
+      digitalWrite(PWM_OUT_PIN, LOW);
+    } else {
+      if (pwmOutputEnabled) {
+        digitalWrite(PWM_OUT_PIN, HIGH);
+        // Jitter Logic (+/- 10us)
+        // 1us = 2 ticks at 8 prescaler
+        int jitter = random(-20, 21);
+        OCR1B = pwmCompare + jitter;
+      }
+    }
   } else {
     // Cycle has finished (resets to 0). Start new pulse.
-    if (pwmOutputEnabled) digitalWrite(PWM_OUT_PIN, HIGH);
+    if (pwmOutputEnabled) {
+      digitalWrite(PWM_OUT_PIN, HIGH);
+      OCR1B = pwmCompare; // Ensure reset
+    }
   }
 }
 
@@ -935,6 +958,50 @@ void handlePPMGenerator() {
   } else if (digitalRead(BTN_DOWN) == LOW) {
     ppmValues[currentPpmChan] -= 5;
     if (ppmValues[currentPpmChan] < sysSettings.minPulse) ppmValues[currentPpmChan] = sysSettings.minPulse;
+    lastButtonPress = millis();
+  }
+}
+
+void handleNoisyPWM() {
+  if (!pwmOutputEnabled) {
+    currentThrottle = sysSettings.minPulse;
+    updatePWMParams(sysSettings.frequency, currentThrottle);
+    pwmOutputEnabled = true;
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(F("---- NOISY SIGNAL ----"));
+  display.drawLine(0, 10, 128, 10, SSD1306_WHITE);
+
+  display.setTextSize(2);
+  display.setCursor(10, 20);
+  display.print(currentThrottle);
+  display.print(F(" us"));
+  
+  // Percent display
+  int percent = map(currentThrottle, sysSettings.minPulse, sysSettings.maxPulse, 0, 100);
+  display.setCursor(10, 40);
+  display.print(F("PWR: ")); display.print(percent); display.print(F("%"));
+
+  display.setTextSize(1);
+  display.setCursor(0, 56);
+  display.print(F("Jitter:+/-10us Drp:5%"));
+
+  display.display();
+
+  updatePWMParams(sysSettings.frequency, currentThrottle);
+
+  if (millis() - lastButtonPress < 30) return; // Faster response
+
+  if (digitalRead(BTN_UP) == LOW) {
+    currentThrottle += 5;
+    if (currentThrottle > sysSettings.maxPulse) currentThrottle = sysSettings.maxPulse;
+    lastButtonPress = millis();
+  } else if (digitalRead(BTN_DOWN) == LOW) {
+    currentThrottle -= 5;
+    if (currentThrottle < sysSettings.minPulse) currentThrottle = sysSettings.minPulse;
     lastButtonPress = millis();
   }
 }
