@@ -11,6 +11,7 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
   - Pulse width (µs) and Frequency (Hz) measurement.
   - Jitter analysis and Dropped Frame tracking.
   - **Mini Logic Analyzer**: Visual waveform representation on the OLED.
+- **Noisy Signal**: Simulate real-world signal issues with programmable jitter (±10µs) and dropped frames (5%) to test ESC stability.
 - **ESC Calibration**: Guided step-by-step routine to calibrate new ESCs.
 - **Stress Test**: High-load cycling to test ESC/Motor cooling and stability.
 - **PPM Generator**: 12-channel PPM signal generation for flight controller testing.
@@ -18,6 +19,40 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
 - **Persistent Settings**: Save your min/max pulse and frequency preferences to EEPROM.
 
 The major portion of this project was coded using Antigravity IDE. Feel free to comment, request edits/changes, pull requests, and give reviews.
+
+## 📐 Signal Specifications
+
+Output is generated from hardware Timer 1 at **0.5 µs resolution** (16 MHz / 8 prescaler).
+
+| Parameter | Range |
+|-----------|-------|
+| Pulse width | 800 – 2200 µs (Min/Max configurable) |
+| Output rate | 50, 60, 100, 200, 300, 400, 490 Hz |
+| Resolution | 0.5 µs (1 timer tick) |
+| Min low time | 50 µs guard between pulses |
+
+### Why the rate tops out at 490 Hz
+
+A pulse has to fit *inside* its own period, with the line returning low in
+between. The maximum rate is therefore set by your **Max Pulse** setting:
+
+```
+max rate = 1,000,000 / (max pulse + 50 µs guard)
+```
+
+At the standard 2000 µs that works out to **~487 Hz**. Anything faster cannot
+represent a full-throttle pulse at all — at 1000 Hz the entire period is
+1000 µs, so a 2000 µs pulse simply does not exist.
+
+The Settings screen shows the current ceiling, and rates above it are skipped
+when cycling rather than being offered and then silently clipped. Raising Max
+Pulse to 2200 µs lowers the ceiling to ~444 Hz and the rate is clamped down
+automatically.
+
+> [!NOTE]
+> If you need rates above ~500 Hz, that requires a scaled protocol such as
+> OneShot125 (125–250 µs), not a standard servo-width pulse. That is not
+> implemented yet — see the roadmap.
 
 ## 🕹️ Hardware Setup
 
@@ -34,10 +69,10 @@ The major portion of this project was coded using Antigravity IDE. Feel free to 
 | **OLED DC** | 9 | SPI Data/Command |
 | **OLED CS** | 10 | SPI Chip Select |
 | **OLED Reset**| 8 | OLED Reset Pin |
-| **PWM Out**  | 3 | Timer 1 Driven |
-| **PWM In**   | 2 | Interrupt Driven |
-| **Button UP**| A1 | Pull-up enabled |
-| **Button DN**| A0 | Pull-up enabled |
+| **PWM Out**  | 3 | Timer 1 Driven (PD3) |
+| **PWM In**   | 2 | Interrupt Driven (PD2) |
+| **Button UP**| A0 | Pull-up enabled |
+| **Button DN**| A1 | Pull-up enabled |
 | **Button SEL**| A2 | Pull-up enabled |
 | **Button BK** | A3 | Pull-up enabled |
 
@@ -56,9 +91,14 @@ Designed with cirkitdesigner IDE
 1. Install the following libraries in the Arduino IDE:
    - `Adafruit GFX Library`
    - `Adafruit SSD1306`
-2. Open `ESC_TOOL.ino` in the Arduino IDE.
+2. Open `ESC_TOOL/ESC_TOOL.ino` in the Arduino IDE.
 3. Select your board (e.g., Arduino Nano) and port.
 4. Click **Upload**.
+
+> [!WARNING]
+> The sketch uses **~91% of flash on an Arduino Nano** (30,720 bytes) and ~87%
+> on an Uno. It fits, but there is little room left for new features on a
+> 328P — budget accordingly before adding modes.
 
 > [!NOTE]
 > ### Safety first
@@ -89,3 +129,9 @@ This project is licensed under the MIT License
 - [x] Add hardware reference sites
 - [x] Add PPM reader
 - [x] Write documentation
+- [x] Add Noisy Signal feature
+- [x] Fix PWM timing glitches at high output rates
+- [ ] Add OneShot125 / scaled-protocol support for rates above 500 Hz
+- [ ] Move menu strings to PROGMEM to reclaim flash
+- [x] Add scope captures of the output waveforms
+- [x] Add OneShot125 / scaled-protocol support for rates above 500 Hz *(arithmetic verified, awaiting scope confirmation)*
