@@ -29,29 +29,49 @@
 #define PWM_PIN_LOW()   (PORTD &= ~(1 << PD3))
 #define PWM_IN_LEVEL()  (PIND & (1 << PD2))
 
-// Timer 1 runs at 2MHz (16MHz / 8), so 1 tick = 0.5us.
+// Standard servo protocol: Timer 1 at 2MHz (16MHz / 8), so 1 tick = 0.5us.
 #define TICKS_PER_US 2
+
+// OneShot125 compresses the whole throttle range into 125-250us. At 0.5us per
+// tick that range is only 250 steps, so the prescaler drops to /1 for this
+// protocol: 16MHz, 0.0625us per tick, 2000 steps across the range.
+#define OS125_TICKS_PER_US 16
+#define OS125_MIN_US       125
+#define OS125_MAX_US       250
 
 // The output must return low between pulses, so the period always has to be
 // longer than the pulse. This guard is the minimum low time we insist on; it
 // also sets the highest frequency a given Max Pulse can legally run at.
-#define PWM_GUARD_US    50
-#define PWM_GUARD_TICKS (PWM_GUARD_US * TICKS_PER_US)
+#define PWM_GUARD_US 50
 
-// Timer 1 TOP is 16-bit, so 2000000/65536 is the slowest achievable rate.
-#define PWM_MIN_HZ 31
+// Timer 1 TOP is 16-bit, so the slowest achievable rate is timerHz/65536:
+// 31Hz at the 2MHz base, but 245Hz at 16MHz. OneShot125 is a high-rate
+// protocol so that floor is not a practical limit, but it must be enforced or
+// TOP silently wraps.
+#define PWM_MIN_HZ       31
+#define OS125_MIN_HZ     245
 
-// Noisy Signal mode parameters
+// Noisy Signal mode parameters. The jitter is deliberately defined in *ticks*
+// rather than microseconds: the tick scale and the pulse scale both shrink by
+// 8x under OneShot125, so 20 ticks stays ~1% of the pulse width in either
+// protocol (10us of 1000us, 1.25us of 125us).
 #define NOISE_DROP_PERCENT 5
-#define NOISE_JITTER_TICKS (10 * TICKS_PER_US)  // +/- 10us
+#define NOISE_JITTER_TICKS (10 * TICKS_PER_US)  // +/- 10us standard, 1.25us OS125
 
 // Display Object
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RESET, OLED_CS);
+
+// Output signal protocol. Stored in EEPROM; selects the timer prescaler and how
+// a throttle position maps onto a pulse width.
+enum PwmProtocol { PROTO_STANDARD = 0, PROTO_ONESHOT125 = 1 };
 
 // Custom PWM Variables (Timer 1 driven)
 volatile unsigned int pwmTop = 39999;     // TOP for freq (Default 50Hz)
 volatile unsigned int pwmCompare = 2000;  // Pulse width in ticks
 volatile bool pwmOutputEnabled = false;
+// Active timer time base. The ISR needs the guard in ticks to clamp jitter, and
+// the tick rate changes with the protocol, so neither can stay a constant.
+volatile unsigned int pwmGuardTicks = PWM_GUARD_US * TICKS_PER_US;
 // OCR1A/OCR1B are not double-buffered in CTC mode. Writing them mid-cycle can
 // miss a compare match and produce a runt or a merged double-width pulse, so
 // the main loop only stages values here and the COMPA ISR commits them at TOP.
@@ -113,18 +133,37 @@ int menuIndex = 0;
 int menuScrollOffset = 0;
 const int menuItemsCount = 10;
 const int visibleItemsCount = 5; 
-const char* menuItems[] = {
-  "Manual PWM",
-  "Step Throttle",
-  "Auto Sweep",
-  "Noisy Signal",
-  "PWM Reader",
-  "PPM Reader",
-  "Stress Test",
-  "ESC Calibration",
-  "PPM Generator",
-  "Settings"
+// A plain `const char*` array puts both the pointer table and the strings in
+// RAM, because the initialisers have to be copied there at startup. Holding
+// them in PROGMEM instead keeps ~125 bytes of SRAM free for the stack. Note
+// this is a RAM saving, not a flash one - the accessor below costs ~48 bytes of
+// flash, so the trade only makes sense while SRAM is the scarcer resource.
+const char mi0[] PROGMEM = "Manual PWM";
+const char mi1[] PROGMEM = "Step Throttle";
+const char mi2[] PROGMEM = "Auto Sweep";
+const char mi3[] PROGMEM = "Noisy Signal";
+const char mi4[] PROGMEM = "PWM Reader";
+const char mi5[] PROGMEM = "PPM Reader";
+const char mi6[] PROGMEM = "Stress Test";
+const char mi7[] PROGMEM = "ESC Calibration";
+const char mi8[] PROGMEM = "PPM Generator";
+const char mi9[] PROGMEM = "Settings";
+
+const char* const menuItems[] PROGMEM = {
+  mi0, mi1, mi2, mi3, mi4, mi5, mi6, mi7, mi8, mi9
 };
+
+// Scratch buffer for the label being drawn. Sized for the longest entry
+// ("ESC Calibration", 15 chars) plus a terminator.
+char menuLabelBuf[17];
+
+// Copy a label out of PROGMEM so it can be printed. The returned pointer is
+// only valid until the next call, which is fine - every caller prints it
+// immediately.
+const char* menuLabel(int idx) {
+  strlcpy_P(menuLabelBuf, (const char*)pgm_read_word(&menuItems[idx]), sizeof(menuLabelBuf));
+  return menuLabelBuf;
+}
 
 // Button Logic
 unsigned long lastButtonPress = 0;
@@ -136,17 +175,30 @@ struct Settings {
   int minPulse;
   int maxPulse;
   int frequency;
+  int protocol;
 };
 
 Settings sysSettings;
-const uint32_t SETTINGS_MAGIC = 0x53455431; // "SET1"
+// Bumped from "SET1" when `protocol` was appended. The old struct was 10 bytes
+// and the new one is 12, so a unit holding SET1 data would keep passing the
+// magic check and read whatever followed as its protocol. The new magic forces
+// those units back to defaults instead.
+const uint32_t SETTINGS_MAGIC = 0x53455432; // "SET2"
+const int settingsRowCount = 4;
 int settingsIndex = 0;
 
-// Selectable output rates. Entries that cannot fit the current Max Pulse plus
-// the low-time guard are skipped, so the tool never offers a rate that would
-// silently clip the pulse (1000Hz cannot carry a 2000us pulse at all).
+// Selectable output rates per protocol. Entries that cannot fit the current
+// max pulse plus the low-time guard are skipped, so the tool never offers a
+// rate that would silently clip the pulse (1000Hz cannot carry a 2000us pulse
+// at all, which is what the standard list stopping at 490 is about).
 const int freqOptions[] = {50, 60, 100, 200, 300, 400, 490};
 const int freqOptionCount = sizeof(freqOptions) / sizeof(freqOptions[0]);
+
+// OneShot125 fits a 250us pulse in a 300us period, so it can run far faster.
+// The 245Hz floor is the 16-bit TOP limit at the 16MHz base, not a protocol
+// choice.
+const int os125FreqOptions[] = {250, 500, 1000, 2000, 3000};
+const int os125FreqOptionCount = sizeof(os125FreqOptions) / sizeof(os125FreqOptions[0]);
 
 // Calibration States
 enum CalibStep { CAL_HIGH, CAL_WAIT, CAL_LOW, CAL_DONE };
@@ -158,8 +210,6 @@ int currentPpmChan = 0;
 volatile byte ppmPhase = 0;
 
 void setup() {
-  Serial.begin(115200);
-
   // Initialize PWM Output Pin
   pinMode(PWM_OUT_PIN, OUTPUT);
   digitalWrite(PWM_OUT_PIN, LOW);
@@ -167,10 +217,10 @@ void setup() {
   // Load Settings
   loadSettings();
 
-  // Initialize display
-  Serial.println(F("Initializing OLED..."));
+  // Initialize display. There is no diagnostic channel if this fails - the
+  // display is the only output and pin 13 is SCK, so the LED cannot be blinked
+  // without fighting SPI. A dead OLED therefore presents as a silent hang.
   if(!display.begin(SSD1306_SWITCHCAPVCC)) {
-    Serial.println(F("SSD1306 allocation failed"));
     for(;;);
   }
 
@@ -185,7 +235,6 @@ void setup() {
   stateTimer = millis();
   
   // Setup Timer 1 for custom PWM (Last, to avoid interfering with boot/SPI)
-  Serial.println(F("Initializing Timer1..."));
   noInterrupts();
   TCCR1A = 0;
   TCCR1B = 0;
@@ -197,9 +246,13 @@ void setup() {
   TIMSK1 |= (1 << OCIE1A);
   TIMSK1 |= (1 << OCIE1B);
   interrupts();
-  
+
+  // The stored protocol decides the prescaler, so the base set above is only a
+  // default. Seed the staged period/width to match it as well.
+  applyProtocolTimer();
+  updatePWMParams(sysSettings.frequency, sysSettings.minPulse);
+
   stateTimer = millis();
-  Serial.println(F("Setup Complete."));
 }
 
 void loop() {
@@ -216,8 +269,11 @@ void loop() {
       }
       pwmOutputEnabled = false; // Stop output
       currentThrottle = sysSettings.minPulse; // Reset throttle to 0%
+      // The PPM generator borrows the 2MHz base, and Settings may have changed
+      // the protocol, so put the timer back on the protocol's own base.
+      applyProtocolTimer();
       updatePWMParams(sysSettings.frequency, currentThrottle);
-      
+
       currentState = MAIN_MENU;
       drawMenu();
       lastButtonPress = millis();
@@ -228,7 +284,6 @@ void loop() {
     case SPLASH: {
       unsigned long elapsed = millis() - stateTimer;
       if (elapsed > 2500) {
-        Serial.println(F("Splash timeout - moving to Menu"));
         currentState = MAIN_MENU;
         drawMenu();
       } else {
@@ -288,7 +343,7 @@ void loop() {
         display.setCursor(0, 0);
         display.setTextSize(1);
         display.println(F("----  MODE  ----"));
-        display.println(menuItems[menuIndex]);
+        display.println(menuLabel(menuIndex));
         display.println(F("\n[BACK] to Exit"));
         display.display();
       }
@@ -354,7 +409,7 @@ void drawMenu() {
       display.setTextColor(SSD1306_WHITE);
     }
     display.setCursor(5, 13 + (i * 10));
-    display.print(menuItems[itemIdx]);
+    display.print(menuLabel(itemIdx));
   }
   
   // Scroll Indicator (Subtle line if more items above/below)
@@ -415,7 +470,7 @@ void handleMenuInput() {
     display.clearDisplay();
     display.setCursor(0,0);
     display.print(F("Entering: "));
-    display.println(menuItems[menuIndex]);
+    display.println(menuLabel(menuIndex));
     display.display();
     stateTimer = millis();
     lastButtonPress = millis();
@@ -424,12 +479,14 @@ void handleMenuInput() {
 
 void loadSettings() {
   EEPROM.get(0, sysSettings);
-  if (sysSettings.magic != SETTINGS_MAGIC || sysSettings.minPulse < 500 || sysSettings.maxPulse > 2500 || sysSettings.frequency < 10) {
-    Serial.println(F("Restoring default settings..."));
+  if (sysSettings.magic != SETTINGS_MAGIC || sysSettings.minPulse < 500 ||
+      sysSettings.maxPulse > 2500 || sysSettings.frequency < 10 ||
+      (sysSettings.protocol != PROTO_STANDARD && sysSettings.protocol != PROTO_ONESHOT125)) {
     sysSettings.magic = SETTINGS_MAGIC;
     sysSettings.minPulse = 1000;
     sysSettings.maxPulse = 2000;
     sysSettings.frequency = 50;
+    sysSettings.protocol = PROTO_STANDARD;
     saveSettings();
   }
   // Guard against a stored rate that predates the protocol limit.
@@ -451,33 +508,41 @@ void handleSettings() {
   display.setCursor(5, 13);  display.print(F("Min Pulse:"));
   display.setCursor(5, 23);  display.print(F("Max Pulse:"));
   display.setCursor(5, 33);  display.print(F("Freq (Hz):"));
+  display.setCursor(5, 43);  display.print(F("Protocol:"));
 
   // Values
   display.setCursor(80, 13); display.print(sysSettings.minPulse);
   display.setCursor(80, 23); display.print(sysSettings.maxPulse);
   display.setCursor(80, 33); display.print(sysSettings.frequency);
+  display.setCursor(80, 43); display.print(isOneShot() ? F("OS125") : F("Std"));
 
   // Selection Box
   int boxY = 12 + (settingsIndex * 10);
   display.drawRect(0, boxY, 128, 10, SSD1306_WHITE);
 
-  // Show the ceiling the Max Pulse imposes, so a skipped rate is explainable.
-  display.setCursor(5, 47);
-  display.print(F("Max rate: "));
-  display.print(maxSafeFrequency(sysSettings.maxPulse));
-  display.print(F("Hz"));
-  display.setCursor(5, 56);
-  display.print(F("(pulse + 50us guard)"));
+  // Show the ceiling the pulse length imposes, so a skipped rate is
+  // explainable. Under OneShot125 the Min/Max Pulse rows above are the input
+  // domain that gets rescaled, so name the range actually leaving the pin.
+  display.setCursor(5, 54);
+  if (isOneShot()) {
+    display.print(F("125-250us max "));
+    display.print(currentMaxFrequency());
+    display.print(F("Hz"));
+  } else {
+    display.print(F("Max rate: "));
+    display.print(currentMaxFrequency());
+    display.print(F("Hz"));
+  }
 
   display.display();
 
   if (millis() - lastButtonPress < debounceDelay) return;
 
   if (digitalRead(BTN_UP) == LOW) {
-    settingsIndex = (settingsIndex - 1 + 3) % 3;
+    settingsIndex = (settingsIndex - 1 + settingsRowCount) % settingsRowCount;
     lastButtonPress = millis();
   } else if (digitalRead(BTN_DOWN) == LOW) {
-    settingsIndex = (settingsIndex + 1) % 3;
+    settingsIndex = (settingsIndex + 1) % settingsRowCount;
     lastButtonPress = millis();
   } else if (digitalRead(BTN_SEL) == LOW) {
     if (settingsIndex == 0) {
@@ -493,16 +558,27 @@ void handleSettings() {
       clampFrequencyToProtocol();
     }
     else if (settingsIndex == 2) {
-      // Advance to the next rate that the current Max Pulse can actually carry.
-      int maxHz = maxSafeFrequency(sysSettings.maxPulse);
+      // Advance to the next rate the active protocol can actually carry.
+      int maxHz = currentMaxFrequency();
+      int minHz = protocolMinHz();
+      const int* opts = activeFreqOptions();
+      int count = activeFreqOptionCount();
       int idx = 0;
-      for (int i = 0; i < freqOptionCount; i++) {
-        if (freqOptions[i] == sysSettings.frequency) { idx = i; break; }
+      for (int i = 0; i < count; i++) {
+        if (opts[i] == sysSettings.frequency) { idx = i; break; }
       }
-      for (int n = 1; n <= freqOptionCount; n++) {
-        int cand = freqOptions[(idx + n) % freqOptionCount];
-        if (cand <= maxHz) { sysSettings.frequency = cand; break; }
+      for (int n = 1; n <= count; n++) {
+        int cand = opts[(idx + n) % count];
+        if (cand <= maxHz && cand >= minHz) { sysSettings.frequency = cand; break; }
       }
+    }
+    else if (settingsIndex == 3) {
+      sysSettings.protocol = isOneShot() ? PROTO_STANDARD : PROTO_ONESHOT125;
+      // Both the rate ceiling and the floor move with the protocol, and the
+      // timer needs a different prescaler to resolve the new pulse range.
+      clampFrequencyToProtocol();
+      applyProtocolTimer();
+      updatePWMParams(sysSettings.frequency, currentThrottle);
     }
     lastButtonPress = millis();
   }
@@ -530,6 +606,16 @@ void handleManualPWM() {
   int percent = map(currentThrottle, sysSettings.minPulse, sysSettings.maxPulse, 0, 100);
   display.setCursor(10, 40);
   display.print(F("PWR: ")); display.print(percent); display.print(F("%"));
+
+  // The big number above is the throttle command in the settings' domain. Under
+  // OneShot125 that is not what reaches the pin, so show the rescaled width.
+  if (isOneShot()) {
+    display.setTextSize(1);
+    display.setCursor(0, 56);
+    display.print(F("OS125 out: "));
+    display.print((int)(oneShotTicks(currentThrottle) / OS125_TICKS_PER_US));
+    display.print(F("us"));
+  }
 
   display.display();
 
@@ -829,9 +915,10 @@ ISR(TIMER1_COMPA_vect) {
     // Dropped Frame Logic: skip the pulse entirely, leaving the line low.
     if (random(100) < NOISE_DROP_PERCENT) return;
 
-    // Jitter Logic (+/- 10us), clamped so noise can never breach the guard.
+    // Jitter Logic (fixed tick count, so ~1% of the pulse in either protocol),
+    // clamped so noise can never breach the guard.
     long width = (long)pwmCompare + random(-NOISE_JITTER_TICKS, NOISE_JITTER_TICKS + 1);
-    long maxWidth = (long)pwmTop - PWM_GUARD_TICKS;
+    long maxWidth = (long)pwmTop - (long)pwmGuardTicks;
     if (width > maxWidth) width = maxWidth;
     if (width < 10) width = 10;
     OCR1B = (unsigned int)width;
@@ -847,37 +934,122 @@ ISR(TIMER1_COMPB_vect) {
   PWM_PIN_LOW();
 }
 
-// Highest rate that can still carry maxPulseUs and return low in between.
-// At the 2000us standard this is ~487Hz, which is why the option list stops
-// at 490 and why 600/1000Hz were never valid for servo-protocol pulses.
-int maxSafeFrequency(int maxPulseUs) {
-  return (int)(1000000UL / (unsigned long)(maxPulseUs + PWM_GUARD_US));
+bool isOneShot() {
+  return sysSettings.protocol == PROTO_ONESHOT125;
 }
 
-// Pull the stored frequency down to something the current Max Pulse supports.
-void clampFrequencyToProtocol() {
-  int maxHz = maxSafeFrequency(sysSettings.maxPulse);
-  if (sysSettings.frequency <= maxHz && sysSettings.frequency >= PWM_MIN_HZ) return;
+// Timer ticks per microsecond for the active protocol (prescaler /8 vs /1).
+uint8_t protocolTicksPerUs() {
+  return isOneShot() ? OS125_TICKS_PER_US : TICKS_PER_US;
+}
 
-  int best = freqOptions[0];
-  for (int i = 0; i < freqOptionCount; i++) {
-    if (freqOptions[i] <= maxHz) best = freqOptions[i];
+// Longest pulse the active protocol can emit. OneShot125 is fixed at 250us by
+// the protocol itself; the standard protocol takes it from the user's setting.
+int protocolMaxPulse() {
+  return isOneShot() ? OS125_MAX_US : sysSettings.maxPulse;
+}
+
+// Slowest rate the active time base can express without TOP overflowing 16 bits.
+int protocolMinHz() {
+  return isOneShot() ? OS125_MIN_HZ : PWM_MIN_HZ;
+}
+
+// Highest rate that can still carry the protocol's longest pulse and return low
+// in between. ~487Hz for a 2000us servo pulse - which is why the standard
+// option list stops at 490 and why 600/1000Hz were never valid. OneShot125's
+// 250us pulse fits in a 300us period, so it reaches ~3333Hz.
+int currentMaxFrequency() {
+  return (int)(1000000UL / (unsigned long)(protocolMaxPulse() + PWM_GUARD_US));
+}
+
+const int* activeFreqOptions() {
+  return isOneShot() ? os125FreqOptions : freqOptions;
+}
+
+int activeFreqOptionCount() {
+  return isOneShot() ? os125FreqOptionCount : freqOptionCount;
+}
+
+// Scale a throttle position from the settings' microsecond domain (typically
+// 1000-2000us) onto OneShot125's 125-250us range, returned in 16MHz timer
+// ticks. Interpolating in ticks rather than microseconds keeps the full
+// 0.0625us resolution instead of rounding to a whole microsecond first.
+unsigned long oneShotTicks(int us) {
+  long span = (long)sysSettings.maxPulse - (long)sysSettings.minPulse;
+  if (span < 1) span = 1;
+  long pos = (long)us - (long)sysSettings.minPulse;
+  if (pos < 0) pos = 0;
+  if (pos > span) pos = span;
+
+  const long minTicks = (long)OS125_MIN_US * OS125_TICKS_PER_US; // 2000
+  const long maxTicks = (long)OS125_MAX_US * OS125_TICKS_PER_US; // 4000
+  return (unsigned long)(minTicks + ((maxTicks - minTicks) * pos) / span);
+}
+
+// Point Timer 1 at a given clock select while preserving CTC mode. Only called
+// with the output disabled - from setup(), from Settings, and on entry to or
+// exit from the PPM generator - so there is never a live waveform to glitch.
+void applyTimerBase(uint8_t csBits) {
+  uint8_t sreg = SREG;
+  cli();
+  TCCR1B = (1 << WGM12) | csBits;
+  TCNT1 = 0;
+  SREG = sreg;
+}
+
+// Prescaler /8 (2MHz) for servo widths, /1 (16MHz) to resolve OneShot125.
+void applyProtocolTimer() {
+  applyTimerBase(isOneShot() ? (1 << CS10) : (1 << CS11));
+}
+
+// Pull the stored frequency into the range the active protocol supports.
+void clampFrequencyToProtocol() {
+  int maxHz = currentMaxFrequency();
+  int minHz = protocolMinHz();
+  const int* opts = activeFreqOptions();
+  int count = activeFreqOptionCount();
+
+  if (sysSettings.frequency >= minHz && sysSettings.frequency <= maxHz) return;
+
+  if (sysSettings.frequency < minHz) {
+    // Arriving from a slower protocol. Take the gentlest valid rate rather than
+    // dropping the ESC straight onto the ceiling.
+    for (int i = 0; i < count; i++) {
+      if (opts[i] >= minHz && opts[i] <= maxHz) {
+        sysSettings.frequency = opts[i];
+        return;
+      }
+    }
+  }
+
+  int best = opts[0];
+  for (int i = 0; i < count; i++) {
+    if (opts[i] <= maxHz) best = opts[i];
   }
   sysSettings.frequency = best;
 }
 
 void updatePWMParams(int hz, int us) {
   // Never emit a rate the pulse width cannot fit inside.
-  int maxHz = maxSafeFrequency(sysSettings.maxPulse);
+  int maxHz = currentMaxFrequency();
+  int minHz = protocolMinHz();
   if (hz > maxHz) hz = maxHz;
-  if (hz < PWM_MIN_HZ) hz = PWM_MIN_HZ;
+  if (hz < minHz) hz = minHz;
 
-  // 16MHz / 8 = 2MHz (0.5us per tick)
-  unsigned long top = (2000000UL / (unsigned long)hz) - 1UL;
+  uint8_t ticksPerUs = protocolTicksPerUs();
+  unsigned long timerHz = 1000000UL * (unsigned long)ticksPerUs; // 2MHz or 16MHz
+
+  unsigned long top = (timerHz / (unsigned long)hz) - 1UL;
   if (top > 65535UL) top = 65535UL; // TOP is a 16-bit register
 
-  unsigned long compare = (unsigned long)us * TICKS_PER_US;
-  unsigned long maxCompare = (top > PWM_GUARD_TICKS) ? (top - PWM_GUARD_TICKS) : 10UL;
+  // Every mode drives currentThrottle in the settings' own microsecond domain,
+  // whatever the protocol. The rescale happens here, at the single point where
+  // a width becomes timer ticks, so no mode has to know which one is active.
+  unsigned long compare = isOneShot() ? oneShotTicks(us)
+                                      : (unsigned long)us * ticksPerUs;
+
+  unsigned long guardTicks = (unsigned long)PWM_GUARD_US * (unsigned long)ticksPerUs;
+  unsigned long maxCompare = (top > guardTicks) ? (top - guardTicks) : 10UL;
   if (compare > maxCompare) compare = maxCompare;
   if (compare < 10UL) compare = 10UL;
 
@@ -887,6 +1059,7 @@ void updatePWMParams(int hz, int us) {
   cli();
   pwmTop = (unsigned int)top;
   pwmCompare = (unsigned int)compare;
+  pwmGuardTicks = (unsigned int)guardTicks;
   pwmParamsDirty = true;
   SREG = sreg;
 }
@@ -1039,6 +1212,11 @@ void handlePPMGenerator() {
     for(int i=0; i<12; i++) {
         ppmValues[i] = constrain(ppmValues[i], sysSettings.minPulse, sysSettings.maxPulse);
     }
+    // PPM is its own standard - the 300us sync pulse and 27ms frame in the ISR
+    // are written as literal 0.5us tick counts, so this mode always runs on the
+    // 2MHz base even when the output protocol is OneShot125. The global BACK
+    // handler restores the protocol's own base on exit.
+    applyTimerBase(1 << CS11);
     noInterrupts();
     TCNT1 = 0;
     OCR1A = 600;
@@ -1120,7 +1298,9 @@ void handleNoisyPWM() {
 
   display.setTextSize(1);
   display.setCursor(0, 56);
-  display.print(F("Jitter:+/-10us Drp:5%"));
+  // The jitter is a fixed tick count, so its size in microseconds follows the
+  // protocol's time base.
+  display.print(isOneShot() ? F("Jit:+/-1.2us Drp:5%") : F("Jit:+/-10us Drp:5%"));
 
   display.display();
 

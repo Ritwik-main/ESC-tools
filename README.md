@@ -16,22 +16,28 @@ A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool pr
 - **Stress Test**: High-load cycling to test ESC/Motor cooling and stability.
 - **PPM Generator**: 12-channel PPM signal generation for flight controller testing.
 - **PPM Reader**: PPM channels reader to analyse and debug radio recievers.
-- **Persistent Settings**: Save your min/max pulse and frequency preferences to EEPROM.
+- **OneShot125**: Selectable scaled protocol for rates up to 3.3 kHz, with the
+  throttle range compressed into 125–250 µs.
+- **Persistent Settings**: Save your min/max pulse, frequency and protocol preferences to EEPROM.
 
 The major portion of this project was coded using Antigravity IDE. Feel free to comment, request edits/changes, pull requests, and give reviews.
 
 ## 📐 Signal Specifications
 
-Output is generated from hardware Timer 1 at **0.5 µs resolution** (16 MHz / 8 prescaler).
+Output is generated from hardware Timer 1. The **Protocol** setting picks both
+the prescaler and how a throttle position maps onto a pulse:
 
-| Parameter | Range |
-|-----------|-------|
-| Pulse width | 800 – 2200 µs (Min/Max configurable) |
-| Output rate | 50, 60, 100, 200, 300, 400, 490 Hz |
-| Resolution | 0.5 µs (1 timer tick) |
-| Min low time | 50 µs guard between pulses |
+| Parameter | Standard | OneShot125 |
+|-----------|----------|------------|
+| Pulse width | 800 – 2200 µs (Min/Max configurable) | 125 – 250 µs (fixed by the protocol) |
+| Output rate | 50, 60, 100, 200, 300, 400, 490 Hz | 250, 500, 1000, 2000, 3000 Hz |
+| Rate ceiling | ~487 Hz at a 2000 µs max pulse | ~3333 Hz |
+| Rate floor | 31 Hz | 245 Hz |
+| Timer base | 2 MHz (÷8), 0.5 µs per tick | 16 MHz (÷1), 0.0625 µs per tick |
+| Resolution | 0.5 µs | 0.0625 µs |
+| Min low time | 50 µs guard between pulses | 50 µs guard between pulses |
 
-### Why the rate tops out at 490 Hz
+### Why the standard rate tops out at 490 Hz
 
 A pulse has to fit *inside* its own period, with the line returning low in
 between. The maximum rate is therefore set by your **Max Pulse** setting:
@@ -49,10 +55,77 @@ when cycling rather than being offered and then silently clipped. Raising Max
 Pulse to 2200 µs lowers the ceiling to ~444 Hz and the rate is clamped down
 automatically.
 
+### OneShot125
+
+Rates above ~500 Hz need a *scaled* protocol, not a faster servo pulse.
+OneShot125 compresses the entire throttle range into 125–250 µs, so a
+full-throttle pulse fits in a 300 µs period and the ceiling moves to ~3333 Hz.
+
+Two consequences worth knowing:
+
+- **The timer switches to prescaler ÷1.** At 0.5 µs per tick, a 125 µs range
+  would only give 250 steps of throttle. At 16 MHz it gives 2000, so resolution
+  improves rather than degrades.
+- **Your Min/Max Pulse settings become the input domain, not the output.**
+  Every mode still works in the familiar 1000–2000 µs numbers; the rescale to
+  125–250 µs happens at the point the width is converted to timer ticks. 50%
+  throttle is 1500 µs on screen and 187.5 µs on the wire. Manual PWM shows the
+  rescaled figure on the bottom line so the two are never confused.
+
 > [!NOTE]
-> If you need rates above ~500 Hz, that requires a scaled protocol such as
-> OneShot125 (125–250 µs), not a standard servo-width pulse. That is not
-> implemented yet — see the roadmap.
+> The **PPM Generator** always runs on the 2 MHz base regardless of this
+> setting — its 300 µs sync pulse and 27 ms frame are a separate standard that
+> OneShot scaling does not apply to.
+
+> [!WARNING]
+> OneShot125 is verified in arithmetic (period, width, guard time and 16-bit
+> range across every rate and throttle combination) and compiles clean, but it
+> has **not yet been confirmed on a scope or against a real OneShot ESC**.
+> Treat the first hardware run as a bench test with the prop off.
+
+## 🔬 Scope captures
+
+Measured on a Keysight EDUX1052A at the output pin (PD3). All captures are from
+the standard servo protocol.
+
+### 0% throttle — 1000 µs at 50 Hz
+![0% throttle](waveforms/0%20duty.png)
+
+Minimum pulse, 5 ms/div. The 20 ms spacing is the 50 Hz frame; the narrow pulse
+is the 1000 µs idle command. Despite the filename, "duty" here means *throttle*
+— the actual duty cycle is 5%.
+
+### 100% throttle — 2000 µs at 50 Hz
+![100% throttle](waveforms/100%20duty.png)
+
+Maximum pulse, same 5 ms/div timebase. The pulse is visibly 2× the width of the
+0% capture, and the duty cycle is 10%.
+
+### 400 Hz output
+![400 Hz](waveforms/400%20hz.png)
+
+500 µs/div. Square edges and a stable 2.5 ms period — this is what the timing
+fixes were verifying. At this rate the compare-register race was frequent enough
+to corrupt roughly every other pulse before the staged-commit change.
+
+### 1 kHz — the failure this project fixed
+![1 kHz failure](waveforms/1%20Khz.png)
+
+> [!WARNING]
+> **This is a "before" capture, not a working output.** 50 µs/div. The line sits
+> high with a single narrow notch instead of pulsing: at 1 kHz the entire period
+> is 1000 µs, so a 2000 µs pulse cannot exist, and the old safety clamp trimmed
+> the width to `period − 5 µs` to produce this near-DC line.
+>
+> This is why rates are now capped to what the configured Max Pulse can actually
+> carry, and why reaching kilohertz rates needs OneShot125 rather than a higher
+> frequency.
+
+### 12-channel PPM frame
+![PPM frame](waveforms/PPM.png)
+
+5 ms/div. Twelve 300 µs sync pulses spaced by their channel widths, followed by
+the long sync gap that pads every frame out to a constant 27 ms.
 
 ## 🕹️ Hardware Setup
 
@@ -76,7 +149,15 @@ automatically.
 | **Button SEL**| A2 | Pull-up enabled |
 | **Button BK** | A3 | Pull-up enabled |
 
-**Note:** If you want to power the circuit with your BEC and not add a battery/USB power it, connect the 5V pin of the ESC to Vin of arduino.
+> [!IMPORTANT]
+> **Powering from the ESC's BEC:** connect the ESC's 5 V output to the Arduino's
+> **5V pin**, not Vin. Vin feeds the onboard regulator, which needs roughly 7 V
+> to hold 5 V at its output — at 5 V in it sits in dropout and the board browns
+> out or runs at a sagging rail. The 5V pin bypasses the regulator, which is what
+> you want from an already-regulated BEC. Ground to GND as usual.
+>
+> Do not also connect USB while powered this way, since that back-feeds the BEC
+> against the USB supply.
 
 <img width="3000" height="2367" alt="circuit_image" src="https://github.com/user-attachments/assets/c663d757-ee5a-47f5-ba49-9e20aff8d1c1" />
 Designed with cirkitdesigner IDE
@@ -96,9 +177,11 @@ Designed with cirkitdesigner IDE
 4. Click **Upload**.
 
 > [!WARNING]
-> The sketch uses **~91% of flash on an Arduino Nano** (30,720 bytes) and ~87%
+> The sketch uses **~90% of flash on an Arduino Nano** (30,720 bytes) and ~85%
 > on an Uno. It fits, but there is little room left for new features on a
-> 328P — budget accordingly before adding modes.
+> 328P — budget accordingly before adding modes. There is no `Serial` output:
+> the debug prints were removed to make room for OneShot125, so a failed OLED
+> init presents as a silent hang rather than a message.
 
 > [!NOTE]
 > ### Safety first
@@ -110,6 +193,14 @@ Designed with cirkitdesigner IDE
 - **Select**: Press **SEL** to enter a mode or change a setting.
 - **Back**: Press **BACK** to stop the current mode and return to the main menu.
 - **Safety**: Throttle is automatically reset to 0% (Min Pulse) when exiting any live output mode.
+- **Settings**: Four rows — Min Pulse, Max Pulse, Freq and Protocol. **SEL**
+  cycles the highlighted row; changing Protocol re-clamps the rate to what that
+  protocol can carry. Settings are written to EEPROM on **BACK**.
+
+> [!NOTE]
+> Adding the Protocol field changed the settings layout, so the EEPROM magic
+> moved from `SET1` to `SET2`. The first boot after this update discards your
+> stored Min/Max/Freq and restores defaults — set them again once.
 
 ## 🤝 Contributing
 
@@ -122,11 +213,13 @@ This project is licensed under the MIT License
 ---
 ## 🚀 Roadmap / To-Do
 - [ ] implement battery pack using tp4056 and mt3608
-- [ ] Add hardware demo and pictures
+- [ ] Add hardware demo pictures of the assembled unit
 - [ ] Add catchy banner maybe
 - [x] Add hardware reference sites
 - [x] Add PPM reader
 - [x] Add Noisy Signal feature
 - [x] Fix PWM timing glitches at high output rates
-- [ ] Add OneShot125 / scaled-protocol support for rates above 500 Hz
-- [ ] Move menu strings to PROGMEM to reclaim flash
+- [x] Add scope captures of the output waveforms
+- [x] Remove Serial debug to reclaim flash (−1,350 B — this is where the flash was)
+- [x] Add OneShot125 / scaled-protocol support for rates above 500 Hz *(arithmetic verified, awaiting scope confirmation)*
+- [x] Move menu strings to PROGMEM — reclaims **RAM** (−125 B), not flash (+48 B)
