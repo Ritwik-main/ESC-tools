@@ -121,12 +121,65 @@ This project is licensed under the MIT License
 
 ---
 ## 🚀 Roadmap / To-Do
+- [x] Initial project setup
+- [x] Implement core API logic
 - [ ] implement battery pack using tp4056 and mt3608
 - [ ] Add hardware demo and pictures
 - [ ] Add catchy banner maybe
 - [x] Add hardware reference sites
 - [x] Add PPM reader
+- [x] Write documentation
 - [x] Add Noisy Signal feature
 - [x] Fix PWM timing glitches at high output rates
+<<<<<<< HEAD
 - [ ] Add OneShot125 / scaled-protocol support for rates above 500 Hz
 - [ ] Move menu strings to PROGMEM to reclaim flash
+=======
+- [x] Add scope captures of the output waveforms
+- [x] Remove Serial debug to reclaim flash (−1,350 B — this is where the flash was)
+- [x] Add OneShot125 / scaled-protocol support for rates above 500 Hz *(arithmetic verified, awaiting scope confirmation)*
+- [x] Move menu strings to PROGMEM — reclaims **RAM** (−125 B), not flash (+48 B)
+
+## 🔧 Changelog
+
+### OneShot125 and the flash budget
+
+- **Added a Protocol setting** (Standard / OneShot125). OneShot switches Timer 1
+  to prescaler ÷1 and rescales the throttle range to 125–250 µs, moving the rate
+  ceiling from ~487 Hz to ~3333 Hz. The rescale happens at one point in
+  `updatePWMParams()`, so every existing mode works unchanged.
+- **Removed the `Serial` debug output**, reclaiming 1,350 bytes of flash. This is
+  what made room for OneShot125; the sketch went from 91% to 87% before the new
+  feature took it back to 90%.
+- **Moved the menu strings to PROGMEM**, freeing 125 bytes of SRAM (39% → 25%
+  overall). This was listed on the roadmap as a flash saving — it is not; it
+  costs 48 bytes of flash and pays back in RAM.
+- **Bumped the EEPROM magic to `SET2`.** The settings struct grew by the protocol
+  field, so stored `SET1` data is now rejected and defaults restored.
+
+### Signal integrity fixes
+
+The output waveform was unstable above ~500 Hz. Root causes, all fixed:
+
+- **600 Hz and 1000 Hz could not carry a servo pulse.** The period was shorter
+  than the pulse, and a safety clamp quietly trimmed the width to
+  `period − 5 µs`, producing a near-DC line with a 5 µs notch instead of PWM.
+  Rates are now capped to what the configured Max Pulse can actually fit.
+- **Compare registers were written mid-cycle.** `OCR1A`/`OCR1B` are not
+  double-buffered in CTC mode, so an update landing after the counter had
+  passed the new value missed the match — giving a merged double-width pulse,
+  or a full 32.7 ms dead period on a frequency change. Values are now staged
+  and committed inside the timer ISR at TOP, the only glitch-free point.
+  The failure rate scaled with duty cycle, which is why it appeared at high
+  rates first.
+- **`digitalWrite()` in the timer ISRs** cost ~4–6 µs per edge. Replaced with
+  direct port writes, removing that much jitter from every transition.
+- **Signal Analyzer never counted dropped frames** (it compared a period
+  against twice itself, which is never true) and could report garbage from
+  torn multi-byte reads of interrupt-owned variables.
+- **Both reader modes went dead after the first exit** — the interrupt was
+  detached but the "attached" flag was never cleared, so re-entering showed
+  frozen values.
+- **PWM Reader force-drove the output** at a hard-coded 50 Hz sweep from a
+  stray line of leftover debug code, ignoring your settings.
+>>>>>>> parent of 9c02eea (Merge origin/main into oneshot125-and-flash-budget)
