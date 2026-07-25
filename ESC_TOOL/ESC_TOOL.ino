@@ -19,8 +19,31 @@
 #define BTN_BACK    A3
 
 // PWM Output Pin
-#define PWM_OUT_PIN 3
-#define PWM_IN_PIN  2
+#define PWM_OUT_PIN 3   // PD3
+#define PWM_IN_PIN  2   // PD2
+
+// Direct port access for the timer ISRs. digitalWrite() costs ~4-6us per call
+// (PROGMEM pin lookup + timer disable + cli/sei), which is a large slice of a
+// 1ms period and shows up as edge jitter on a scope. These are 1-2 cycles.
+#define PWM_PIN_HIGH()  (PORTD |=  (1 << PD3))
+#define PWM_PIN_LOW()   (PORTD &= ~(1 << PD3))
+#define PWM_IN_LEVEL()  (PIND & (1 << PD2))
+
+// Timer 1 runs at 2MHz (16MHz / 8), so 1 tick = 0.5us.
+#define TICKS_PER_US 2
+
+// The output must return low between pulses, so the period always has to be
+// longer than the pulse. This guard is the minimum low time we insist on; it
+// also sets the highest frequency a given Max Pulse can legally run at.
+#define PWM_GUARD_US    50
+#define PWM_GUARD_TICKS (PWM_GUARD_US * TICKS_PER_US)
+
+// Timer 1 TOP is 16-bit, so 2000000/65536 is the slowest achievable rate.
+#define PWM_MIN_HZ 31
+
+// Noisy Signal mode parameters
+#define NOISE_DROP_PERCENT 5
+#define NOISE_JITTER_TICKS (10 * TICKS_PER_US)  // +/- 10us
 
 // Display Object
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RESET, OLED_CS);
@@ -29,6 +52,10 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RESET,
 volatile unsigned int pwmTop = 39999;     // TOP for freq (Default 50Hz)
 volatile unsigned int pwmCompare = 2000;  // Pulse width in ticks
 volatile bool pwmOutputEnabled = false;
+// OCR1A/OCR1B are not double-buffered in CTC mode. Writing them mid-cycle can
+// miss a compare match and produce a runt or a merged double-width pulse, so
+// the main loop only stages values here and the COMPA ISR commits them at TOP.
+volatile bool pwmParamsDirty = false;
 
 int currentThrottle = 1000;
 
@@ -36,19 +63,20 @@ int currentThrottle = 1000;
 volatile unsigned long pulseStart = 0;
 volatile unsigned long lastRise = 0;
 volatile unsigned long pulsePeriod = 0;
+volatile unsigned long nominalPeriod = 0; // Running average, used to spot gaps
 volatile int pulseInValue = 0;
 
 int minObserved = 3000;
 int maxObserved = 0;
 float signalFreq = 0;
-uint8_t scopeBuffer[64]; // Waveform history
-uint8_t scopeIdx = 0;
 
 // Dropped Frame Tracking
-volatile unsigned long lastPulseTime = 0;
 volatile int droppedFrameCount = 0;
-unsigned long lastDropReset = 0;
 int droppedFPS = 0;
+
+// Set while an edge interrupt is hooked to PWM_IN_PIN. File scope so the global
+// BACK handler can tear the reader down and let it re-arm on the next entry.
+bool readerAttached = false;
 
 // PPM Reader Variables
 volatile int ppmInValues[12];
@@ -59,7 +87,7 @@ volatile unsigned int ppmFrameCount = 0;
 // Sweep Variables
 bool sweepDirection = true;
 unsigned long lastSweepUpdate = 0;
-int sweepInterval = 30; // ms
+unsigned long sweepInterval = 30; // ms
 
 // System States
 enum SystemState {
@@ -77,7 +105,7 @@ enum SystemState {
   NOISY_PWM
 };
 
-SystemState currentState = SPLASH;
+volatile SystemState currentState = SPLASH; // Read inside the Timer 1 ISRs
 unsigned long stateTimer = 0;
 
 // Menu Variables
@@ -113,6 +141,12 @@ struct Settings {
 Settings sysSettings;
 const uint32_t SETTINGS_MAGIC = 0x53455431; // "SET1"
 int settingsIndex = 0;
+
+// Selectable output rates. Entries that cannot fit the current Max Pulse plus
+// the low-time guard are skipped, so the tool never offers a rate that would
+// silently clip the pulse (1000Hz cannot carry a 2000us pulse at all).
+const int freqOptions[] = {50, 60, 100, 200, 300, 400, 490};
+const int freqOptionCount = sizeof(freqOptions) / sizeof(freqOptions[0]);
 
 // Calibration States
 enum CalibStep { CAL_HIGH, CAL_WAIT, CAL_LOW, CAL_DONE };
@@ -174,8 +208,10 @@ void loop() {
     if (digitalRead(BTN_BACK) == LOW && (millis() - lastButtonPress > debounceDelay)) {
       if (currentState == PWM_READER || currentState == PPM_READER) {
         detachInterrupt(digitalPinToInterrupt(PWM_IN_PIN));
+        readerAttached = false; // Let the reader re-arm on the next entry
       }
       if (currentState == SETTINGS) {
+        clampFrequencyToProtocol();
         saveSettings();
       }
       pwmOutputEnabled = false; // Stop output
@@ -196,8 +232,7 @@ void loop() {
         currentState = MAIN_MENU;
         drawMenu();
       } else {
-        int progress = map(elapsed, 0, 2500, 0, 100);
-        drawSplashScreen(progress);
+        drawSplashScreen();
       }
       break;
     }
@@ -261,7 +296,7 @@ void loop() {
   }
 }
 
-void drawSplashScreen(int progress) {
+void drawSplashScreen() {
   display.clearDisplay();
   
   // --- Screen Border ---
@@ -397,6 +432,8 @@ void loadSettings() {
     sysSettings.frequency = 50;
     saveSettings();
   }
+  // Guard against a stored rate that predates the protocol limit.
+  clampFrequencyToProtocol();
 }
 
 void saveSettings() {
@@ -423,7 +460,15 @@ void handleSettings() {
   // Selection Box
   int boxY = 12 + (settingsIndex * 10);
   display.drawRect(0, boxY, 128, 10, SSD1306_WHITE);
-  
+
+  // Show the ceiling the Max Pulse imposes, so a skipped rate is explainable.
+  display.setCursor(5, 47);
+  display.print(F("Max rate: "));
+  display.print(maxSafeFrequency(sysSettings.maxPulse));
+  display.print(F("Hz"));
+  display.setCursor(5, 56);
+  display.print(F("(pulse + 50us guard)"));
+
   display.display();
 
   if (millis() - lastButtonPress < debounceDelay) return;
@@ -444,13 +489,20 @@ void handleSettings() {
       if (sysSettings.maxPulse == 2000) sysSettings.maxPulse = 2200;
       else if (sysSettings.maxPulse == 2200) sysSettings.maxPulse = 1800;
       else sysSettings.maxPulse = 2000;
+      // A longer pulse needs a longer period, so the rate may no longer fit.
+      clampFrequencyToProtocol();
     }
     else if (settingsIndex == 2) {
-      if (sysSettings.frequency == 50) sysSettings.frequency = 60;
-      else if (sysSettings.frequency == 60) sysSettings.frequency = 400;
-      else if (sysSettings.frequency == 400) sysSettings.frequency = 600;
-      else if (sysSettings.frequency == 600) sysSettings.frequency = 1000;
-      else sysSettings.frequency = 50;
+      // Advance to the next rate that the current Max Pulse can actually carry.
+      int maxHz = maxSafeFrequency(sysSettings.maxPulse);
+      int idx = 0;
+      for (int i = 0; i < freqOptionCount; i++) {
+        if (freqOptions[i] == sysSettings.frequency) { idx = i; break; }
+      }
+      for (int n = 1; n <= freqOptionCount; n++) {
+        int cand = freqOptions[(idx + n) % freqOptionCount];
+        if (cand <= maxHz) { sysSettings.frequency = cand; break; }
+      }
     }
     lastButtonPress = millis();
   }
@@ -539,17 +591,32 @@ void handleAutoSweep() {
 }
 
 void pwmMeasureISR() {
+  // Sample the pin before anything else. micros() takes a few microseconds and
+  // ISR entry can be delayed by another interrupt, so a narrow pulse may have
+  // already flipped back by the time we get here - reading late misclassifies
+  // the edge and corrupts the measurement.
+  uint8_t level = PWM_IN_LEVEL();
   unsigned long now = micros();
-  if (digitalRead(PWM_IN_PIN) == HIGH) {
+
+  if (level) {
     if (lastRise > 0) {
-      pulsePeriod = now - lastRise;
-      // If gap is > 2x the expected period (e.g. > 40ms at 50Hz), it's a drop
-      unsigned long expectedMax = (pulsePeriod > 0) ? (pulsePeriod * 2) : 40000;
-      if (now - lastRise > expectedMax && lastRise > 0) droppedFrameCount++;
+      unsigned long period = now - lastRise;
+      // Compare against the running nominal period, not the one we just
+      // measured. The original compared period against 2x itself, which is
+      // never true, so drops were never counted.
+      if (nominalPeriod > 0 && period > nominalPeriod + (nominalPeriod >> 1)) {
+        droppedFrameCount += (int)(period / nominalPeriod) - 1;
+      } else if (nominalPeriod == 0) {
+        nominalPeriod = period;
+      } else {
+        // Slow moving average, only fed by periods that look healthy.
+        nominalPeriod = nominalPeriod - (nominalPeriod >> 3) + (period >> 3);
+      }
+      pulsePeriod = period;
     }
     lastRise = now;
     pulseStart = now;
-  } else {
+  } else if (pulseStart > 0) {
     pulseInValue = (int)(now - pulseStart);
   }
 }
@@ -571,22 +638,35 @@ void ppmMeasureISR() {
 }
 
 void handlePWMReader() {
-  static bool interruptAttached = false;
-  if (!interruptAttached) {
+  if (!readerAttached) {
     pinMode(PWM_IN_PIN, INPUT_PULLUP);
+    // Reset stats and history before arming, so a stale timestamp from a
+    // previous session cannot be read as one enormous period.
+    noInterrupts();
+    lastRise = 0; pulseStart = 0; pulsePeriod = 0;
+    nominalPeriod = 0; pulseInValue = 0; droppedFrameCount = 0;
+    interrupts();
+    minObserved = 3000; maxObserved = 0;
+    signalFreq = 0;
     attachInterrupt(digitalPinToInterrupt(PWM_IN_PIN), pwmMeasureISR, CHANGE);
-    interruptAttached = true;
-    minObserved = 3000; maxObserved = 0; // Reset stats
+    readerAttached = true;
   }
+
+  // Snapshot the ISR-owned values together. These are 2- and 4-byte reads that
+  // an edge interrupt can land in the middle of, yielding a half-updated value.
+  uint8_t sreg = SREG;
+  cli();
+  int pulseUs = pulseInValue;
+  unsigned long periodUs = pulsePeriod;
+  int drops = droppedFrameCount;
+  SREG = sreg;
 
   // Calculate Stats
-  if (pulseInValue > 0) {
-    if (pulseInValue < minObserved) minObserved = pulseInValue;
-    if (pulseInValue > maxObserved) maxObserved = pulseInValue;
+  if (pulseUs > 0) {
+    if (pulseUs < minObserved) minObserved = pulseUs;
+    if (pulseUs > maxObserved) maxObserved = pulseUs;
   }
-  if (pulsePeriod > 0) signalFreq = 1000000.0 / pulsePeriod;
-
-  if (!pwmOutputEnabled) pwmOutputEnabled = true; if (millis() - lastSweepUpdate > 20) { if (sweepDirection) { currentThrottle += 10; if (currentThrottle >= 2000) sweepDirection = false; } else { currentThrottle -= 10; if (currentThrottle <= 1000) sweepDirection = true; } updatePWMParams(50, currentThrottle); lastSweepUpdate = millis(); }
+  if (periodUs > 0) signalFreq = 1000000.0 / periodUs;
 
   display.clearDisplay();
   display.setTextSize(1);
@@ -595,7 +675,7 @@ void handlePWMReader() {
   
   // Pulse & Freq
   display.setCursor(0, 12);
-  display.print(pulseInValue); display.print(F("us "));
+  display.print(pulseUs); display.print(F("us "));
   display.print(signalFreq, 1); display.print(F("Hz"));
 
   // Statistics
@@ -603,14 +683,14 @@ void handlePWMReader() {
   display.print(F("Min:")); display.print(minObserved);
   display.print(F(" Max:")); display.print(maxObserved);
   display.print(F(" \nJit:")); display.print(maxObserved - minObserved);
-  display.print(F(" Drp:")); display.print(droppedFrameCount);
+  display.print(F(" Drp:")); display.print(drops);
 
   // --- Mini Scope (Logic Analyzer Style) ---
   // Draw a clean baseline
   display.drawLine(0, 63, 127, 63, SSD1306_WHITE);
 
   // Calculate pulse width visually
-  int highWidth = map(pulseInValue, 800, 2200, 2, 120);
+  int highWidth = map(pulseUs, 800, 2200, 2, 120);
   if (highWidth < 2) highWidth = 2; // Visibility
   if (highWidth > 120) highWidth = 120;
 
@@ -629,33 +709,46 @@ void handlePWMReader() {
 
   if (digitalRead(BTN_SEL) == LOW) {
     minObserved = 3000; maxObserved = 0;
+    noInterrupts();
+    droppedFrameCount = 0;
+    interrupts();
   }
-
-  // Handle exiting (detach interrupt)
-  if (currentState != PWM_READER) {
-    detachInterrupt(digitalPinToInterrupt(PWM_IN_PIN));
-    interruptAttached = false;
-  }
+  // Teardown lives in the global BACK handler in loop(); this function only
+  // runs while currentState is PWM_READER, so a check for leaving it here
+  // could never fire and the reader stayed dead on the second entry.
 }
 
 void handlePPMReader() {
-  static bool interruptAttached = false;
   static unsigned long lastFpsCalc = 0;
   static unsigned int lastFrameCount = 0;
-  
-  if (!interruptAttached) {
+
+  if (!readerAttached) {
     pinMode(PWM_IN_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(PWM_IN_PIN), ppmMeasureISR, RISING);
-    interruptAttached = true;
+    noInterrupts();
     for(int i=0; i<12; i++) ppmInValues[i] = 0;
+    ppmInChannel = 0;
+    lastPpmTime = micros();
     ppmFrameCount = 0;
+    interrupts();
     lastFrameCount = 0;
+    lastFpsCalc = millis();
+    attachInterrupt(digitalPinToInterrupt(PWM_IN_PIN), ppmMeasureISR, RISING);
+    readerAttached = true;
   }
 
+  // Snapshot the ISR-owned channel data in one go.
+  int chVals[8];
+  unsigned int frames;
+  uint8_t sreg = SREG;
+  cli();
+  for (int i = 0; i < 8; i++) chVals[i] = ppmInValues[i];
+  frames = ppmFrameCount;
+  SREG = sreg;
+
   // Calculate Refresh Rate
-  if (millis() - lastFpsCalc > 1000) {
-    droppedFPS = ppmFrameCount - lastFrameCount;
-    lastFrameCount = ppmFrameCount;
+  if (millis() - lastFpsCalc >= 1000) {
+    droppedFPS = (int)(frames - lastFrameCount);
+    lastFrameCount = frames;
     lastFpsCalc = millis();
   }
 
@@ -672,10 +765,10 @@ void handlePPMReader() {
     
     display.setCursor(x, y);
     display.print(F("C")); display.print(i + 1); display.print(F(":"));
-    display.print(ppmInValues[i]);
-    
+    display.print(chVals[i]);
+
     // Mini bar
-    int barW = map(constrain(ppmInValues[i], 800, 2200), 800, 2200, 0, 28);
+    int barW = map(constrain(chVals[i], 800, 2200), 800, 2200, 0, 28);
     display.drawRect(x + 34, y + 1, 30, 5, SSD1306_WHITE);
     display.fillRect(x + 35, y + 2, barW, 3, SSD1306_WHITE);
   }
@@ -687,11 +780,7 @@ void handlePPMReader() {
   display.print(F(" Hz"));
   
   display.display();
-
-  if (currentState != PPM_READER) {
-    detachInterrupt(digitalPinToInterrupt(PWM_IN_PIN));
-    interruptAttached = false;
-  }
+  // Teardown is handled by the global BACK handler in loop().
 }
 
 // Timer 1 Interrupts for manual PWM on Pin 3
@@ -701,14 +790,16 @@ ISR(TIMER1_COMPA_vect) {
     if (ppmPhase == 0) usedTicks = 0;
 
     if (ppmPhase % 2 == 0) {
-      digitalWrite(PWM_OUT_PIN, HIGH);
+      PWM_PIN_HIGH();
       OCR1A = 600; // 300us pulse
       usedTicks += 600;
     } else {
-      digitalWrite(PWM_OUT_PIN, LOW);
+      PWM_PIN_LOW();
       int chan = ppmPhase / 2;
       if (chan < 12) {
-        unsigned int valTicks = (ppmValues[chan] * 2) - 600;
+        long ticks = ((long)ppmValues[chan] * TICKS_PER_US) - 600;
+        if (ticks < 200) ticks = 200; // Never let a short channel underflow
+        unsigned int valTicks = (unsigned int)ticks;
         OCR1A = valTicks;
         usedTicks += valTicks;
       } else {
@@ -719,49 +810,85 @@ ISR(TIMER1_COMPA_vect) {
     }
     ppmPhase++;
     if (ppmPhase >= 26) ppmPhase = 0;
-  } else if (currentState == NOISY_PWM) {
-    // Dropped Frame Logic (approx 5% drop rate)
-    if (random(100) < 5) {
-      digitalWrite(PWM_OUT_PIN, LOW);
-    } else {
-      if (pwmOutputEnabled) {
-        digitalWrite(PWM_OUT_PIN, HIGH);
-        // Jitter Logic (+/- 10us)
-        // 1us = 2 ticks at 8 prescaler
-        int jitter = random(-20, 21);
-        OCR1B = pwmCompare + jitter;
-      }
-    }
-  } else {
-    // Cycle has finished (resets to 0). Start new pulse.
-    if (pwmOutputEnabled) {
-      digitalWrite(PWM_OUT_PIN, HIGH);
-      OCR1B = pwmCompare; // Ensure reset
-    }
+    return;
   }
+
+  // TOP: the counter has just reset, so this is the one point in the cycle
+  // where new period/width values can be loaded without missing a match.
+  if (pwmParamsDirty) {
+    OCR1A = pwmTop;
+    OCR1B = pwmCompare;
+    pwmParamsDirty = false;
+  } else {
+    OCR1B = pwmCompare; // Undo any jitter applied to the previous cycle
+  }
+
+  if (!pwmOutputEnabled) return; // Pin is already low and COMPB keeps it there
+
+  if (currentState == NOISY_PWM) {
+    // Dropped Frame Logic: skip the pulse entirely, leaving the line low.
+    if (random(100) < NOISE_DROP_PERCENT) return;
+
+    // Jitter Logic (+/- 10us), clamped so noise can never breach the guard.
+    long width = (long)pwmCompare + random(-NOISE_JITTER_TICKS, NOISE_JITTER_TICKS + 1);
+    long maxWidth = (long)pwmTop - PWM_GUARD_TICKS;
+    if (width > maxWidth) width = maxWidth;
+    if (width < 10) width = 10;
+    OCR1B = (unsigned int)width;
+  }
+
+  // Cycle has finished (resets to 0). Start new pulse.
+  PWM_PIN_HIGH();
 }
 
 ISR(TIMER1_COMPB_vect) {
   if (currentState == PPM_GENERATOR) return;
   // Pulse width reached. End pulse.
-  digitalWrite(PWM_OUT_PIN, LOW);
+  PWM_PIN_LOW();
+}
+
+// Highest rate that can still carry maxPulseUs and return low in between.
+// At the 2000us standard this is ~487Hz, which is why the option list stops
+// at 490 and why 600/1000Hz were never valid for servo-protocol pulses.
+int maxSafeFrequency(int maxPulseUs) {
+  return (int)(1000000UL / (unsigned long)(maxPulseUs + PWM_GUARD_US));
+}
+
+// Pull the stored frequency down to something the current Max Pulse supports.
+void clampFrequencyToProtocol() {
+  int maxHz = maxSafeFrequency(sysSettings.maxPulse);
+  if (sysSettings.frequency <= maxHz && sysSettings.frequency >= PWM_MIN_HZ) return;
+
+  int best = freqOptions[0];
+  for (int i = 0; i < freqOptionCount; i++) {
+    if (freqOptions[i] <= maxHz) best = freqOptions[i];
+  }
+  sysSettings.frequency = best;
 }
 
 void updatePWMParams(int hz, int us) {
-  // 16MHz / 8 = 2MHz (0.5us per tick)
-  unsigned long top = (2000000UL / hz) - 1;
-  unsigned int compare = us * 2; // us to ticks (0.5us each)
-  
-  // Safety check
-  if (compare >= top) compare = top - 10;
-  if (compare < 10) compare = 10;
+  // Never emit a rate the pulse width cannot fit inside.
+  int maxHz = maxSafeFrequency(sysSettings.maxPulse);
+  if (hz > maxHz) hz = maxHz;
+  if (hz < PWM_MIN_HZ) hz = PWM_MIN_HZ;
 
-  noInterrupts();
+  // 16MHz / 8 = 2MHz (0.5us per tick)
+  unsigned long top = (2000000UL / (unsigned long)hz) - 1UL;
+  if (top > 65535UL) top = 65535UL; // TOP is a 16-bit register
+
+  unsigned long compare = (unsigned long)us * TICKS_PER_US;
+  unsigned long maxCompare = (top > PWM_GUARD_TICKS) ? (top - PWM_GUARD_TICKS) : 10UL;
+  if (compare > maxCompare) compare = maxCompare;
+  if (compare < 10UL) compare = 10UL;
+
+  // Stage only. The COMPA ISR loads these into OCR1A/OCR1B at TOP, where the
+  // counter has just reset and a write can never be missed.
+  uint8_t sreg = SREG;
+  cli();
   pwmTop = (unsigned int)top;
-  pwmCompare = compare;
-  OCR1A = pwmTop;
-  OCR1B = pwmCompare;
-  interrupts();
+  pwmCompare = (unsigned int)compare;
+  pwmParamsDirty = true;
+  SREG = sreg;
 }
 
 void handleCalibration() {
@@ -835,9 +962,11 @@ void handleStepThrottle() {
   int percent = map(currentThrottle, sysSettings.minPulse, sysSettings.maxPulse, 0, 100);
   display.setCursor(10, 40);
   display.print(F("PWR: ")); display.print(percent); display.print(F("%"));
-  
+
   // Progress Bar for steps
-  int barWidth = map(currentThrottle, sysSettings.minPulse, sysSettings.maxPulse, 0, 128);
+  int barWidth = map(currentThrottle, sysSettings.minPulse, sysSettings.maxPulse, 0, 126);
+  display.drawRect(0, 54, 128, 8, SSD1306_WHITE);
+  display.fillRect(1, 55, barWidth, 6, SSD1306_WHITE);
 
   display.display();
 
@@ -951,13 +1080,17 @@ void handlePPMGenerator() {
 
   if (millis() - lastButtonPress < 30) return; // Fast adjustment for PWM values
 
+  // The PPM ISR reads these, and a 2-byte store is not atomic on AVR, so an
+  // interrupt landing mid-write would emit a garbage channel width.
   if (digitalRead(BTN_UP) == LOW) {
-    ppmValues[currentPpmChan] += 5;
-    if (ppmValues[currentPpmChan] > sysSettings.maxPulse) ppmValues[currentPpmChan] = sysSettings.maxPulse;
+    int v = ppmValues[currentPpmChan] + 5;
+    if (v > sysSettings.maxPulse) v = sysSettings.maxPulse;
+    noInterrupts(); ppmValues[currentPpmChan] = v; interrupts();
     lastButtonPress = millis();
   } else if (digitalRead(BTN_DOWN) == LOW) {
-    ppmValues[currentPpmChan] -= 5;
-    if (ppmValues[currentPpmChan] < sysSettings.minPulse) ppmValues[currentPpmChan] = sysSettings.minPulse;
+    int v = ppmValues[currentPpmChan] - 5;
+    if (v < sysSettings.minPulse) v = sysSettings.minPulse;
+    noInterrupts(); ppmValues[currentPpmChan] = v; interrupts();
     lastButtonPress = millis();
   }
 }

@@ -1,0 +1,45 @@
+# Arduino-specific
+*.elf
+*.bin
+*.hex
+*.o
+*.a
+*.s
+*.ko
+*.so
+*.mod.c
+.hex
+.elf
+.bin
+
+# Build folders
+build/
+bin/
+obj/
+
+# VS Code
+.vscode/
+.history/
+*.log
+
+# Workspace / Settings
+.agent/
+.gemini/
+.settings/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Arduino IDE 1.x / 2.x specific
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Metadata
+implementation_plan.md
+tasks.md
+OLED.txt
+PWM.txt
