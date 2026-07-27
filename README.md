@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="ESC Tools — PWM debugger &amp; signal tool" width="100%">
+</p>
+
 # ESC Tools (v1.0) 🛠️
 
 A comprehensive **ESC Debugger & Signal Tool** built using Arduino. This tool provides a powerful interface for testing, calibrating, and analyzing Electronic Speed Controllers (ESCs), Servo motors, Flight computers, Stepper motors, and all PWM Interfaces, all within a compact handheld device.
@@ -125,7 +129,7 @@ This project is licensed under the MIT License
 - [x] Implement core API logic
 - [ ] implement battery pack using tp4056 and mt3608
 - [ ] Add hardware demo and pictures
-- [ ] Add catchy banner maybe
+- [x] Add catchy banner maybe
 - [x] Add hardware reference sites
 - [x] Add PPM reader
 - [x] Write documentation
